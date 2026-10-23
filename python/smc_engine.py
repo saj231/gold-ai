@@ -46,7 +46,7 @@ def prepare(df):
 
 
 def _ny_window(ts):
-    """Silver Bullet windows in New York time: 03-04, 10-11, 14-15."""
+    # Silver Bullet windows in New York time: 03-04, 10-11, 14-15
     ny = ts.tz_localize("UTC").tz_convert("America/New_York")
     m = np.asarray(ny.hour * 60 + ny.minute)
     w = np.zeros(len(ts), dtype=int)
@@ -57,8 +57,8 @@ def _ny_window(ts):
 
 
 def detect(df):
-    """Creates PENDING LIMIT ORDERS at bar close (no lookahead).
-    Each row = one order: limit price, stop, setup, direction, features."""
+    # Creates PENDING LIMIT ORDERS at bar close (no lookahead).
+    # Each row = one order: limit price, stop, setup, direction, features.
     n = len(df)
     o, h, l, c = (df[k].values for k in ("open", "high", "low", "close"))
     atr = df["atr"].values
@@ -268,6 +268,65 @@ def detect(df):
 
 
 def label_signals(df, sig):
-    """Simulates the pending limit order.
-    Long:  fills when bid low <= limit - spread (ask touches limit); SL/TP on bid.
-    Short: fills when bid high >= limit; SL when ask (high+spread) >= stop; TP when ask
+    # Simulates the pending limit order.
+    # Long: fills when bid low <= limit - spread; SL/TP on bid.
+    # Short: fills when bid high >= limit; SL when ask (high+spread) >= stop; TP when ask <= tp.
+    # Same-bar SL+TP -> loss. SL on the fill bar -> loss. Timeout -> mark-to-market R.
+    h, l, c = df["high"].values, df["low"].values, df["close"].values
+    n = len(df)
+    m = len(sig)
+    bar = sig["bar"].values.astype(int)
+    dr = sig["dir"].values.astype(int)
+    lim = sig["limit"].values
+    stp = sig["stop"].values
+    filled = np.full(m, np.nan)
+    ycols = {rr: np.full(m, np.nan) for rr in RRS}
+    rcols = {rr: np.full(m, np.nan) for rr in RRS}
+    INF = 10 ** 9
+
+    for t in range(m):
+        i, d = bar[t], dr[t]
+        if i + 1 + EXPIRE + MAX_HOLD > n:
+            continue
+        lj, hj = l[i + 1:i + 1 + EXPIRE], h[i + 1:i + 1 + EXPIRE]
+        fill = (lj <= lim[t] - SPREAD) if d == 1 else (hj >= lim[t])
+        if not fill.any():
+            filled[t] = 0
+            continue
+        filled[t] = 1
+        jf = i + 1 + int(fill.argmax())
+        R = abs(lim[t] - stp[t])
+        sl_fill = (l[jf] <= stp[t]) if d == 1 else (h[jf] + SPREAD >= stp[t])
+        sh_, sl_ = h[jf + 1:jf + 1 + MAX_HOLD], l[jf + 1:jf + 1 + MAX_HOLD]
+        if d == 1:
+            hit_sl = sl_ <= stp[t]
+        else:
+            hit_sl = sh_ + SPREAD >= stp[t]
+        t_sl = int(hit_sl.argmax()) if hit_sl.any() else INF
+        cx = c[jf + MAX_HOLD]
+        mtm = (cx - lim[t]) / R if d == 1 else (lim[t] - cx - SPREAD) / R
+        for rr in RRS:
+            if sl_fill:
+                r = -1.0
+            else:
+                tp = lim[t] + d * rr * R
+                hit_tp = (sh_ >= tp) if d == 1 else (sl_ + SPREAD <= tp)
+                t_tp = int(hit_tp.argmax()) if hit_tp.any() else INF
+                if t_tp < t_sl:
+                    r = float(rr)
+                elif t_sl < INF:
+                    r = -1.0
+                else:
+                    r = float(np.clip(mtm, -1.0, rr))
+            rcols[rr][t] = r
+            ycols[rr][t] = 1.0 if r > 0 else 0.0
+
+    sig = sig.copy()
+    sig["filled"] = filled
+    for rr in RRS:
+        sig[f"y_{rr}"] = ycols[rr]
+        sig[f"R_{rr}"] = rcols[rr]
+    return sig
+
+
+# END OF FILE
