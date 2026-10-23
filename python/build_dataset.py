@@ -7,16 +7,19 @@ m15 = pd.read_parquet(src)
 df = prepare(m15)
 sig = detect(df)
 sig = label_signals(df, sig)
-sig = sig.dropna(subset=[f"y_{RRS[0]}"]).reset_index(drop=True)
+sig = sig.dropna(subset=["filled"]).reset_index(drop=True)
 sig.to_parquet(out, compression="zstd")
 
-print("signals:", len(sig), "| range:", sig["time"].min(), "->", sig["time"].max())
-summary = sig.groupby("setup").agg(
-    n=("bar", "count"),
-    win_1_5=("y_1.5", "mean"),
-    win_2=("y_2.0", "mean"),
-    win_3=("y_3.0", "mean"),
-)
-# expectancy in R (ignoring timeouts nuance): win*RR - (1-win)
-summary["exp_R_2"] = summary["win_2"] * 2 - (1 - summary["win_2"])
-print(summary.round(3).sort_values("exp_R_2", ascending=False))
+print("orders:", len(sig), "| range:", sig["time"].min(), "->", sig["time"].max())
+g = sig.groupby("setup")
+rep = pd.DataFrame({"orders": g.size(), "fill_rate": g["filled"].mean()})
+f = sig[sig["filled"] == 1]
+gf = f.groupby("setup")
+rep["filled"] = gf.size()
+for rr in RRS:
+    rep[f"win{rr}"] = gf[f"y_{rr}"].mean()
+for rr in RRS:
+    rep[f"R{rr}"] = gf[f"R_{rr}"].mean()
+print(rep.round(3).sort_values(f"R{RRS[1]}", ascending=False).to_string())
+print()
+print("ALL filled:", len(f), {f"R{rr}": round(f[f"R_{rr}"].mean(), 3) for rr in RRS})
