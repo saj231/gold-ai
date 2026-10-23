@@ -21,7 +21,13 @@ jobs:
         run: |
           python data_loader.py ../data/*.zip m15.parquet
           python build_dataset.py m15.parquet dataset.parquet | tee report.txt
-          { echo '```'; cat report.txt; echo '```'; } >> $GITHUB_STEP_SUMMARY
+      - name: Train and evaluate
+        working-directory: python
+        run: python train.py dataset.parquet model | tee train_report.txt
+      - name: Summary
+        working-directory: python
+        run: |
+          { echo '```'; cat report.txt; echo; cat train_report.txt; echo '```'; } >> $GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         with:
           name: dataset
@@ -29,3 +35,5 @@ jobs:
             python/m15.parquet
             python/dataset.parquet
             python/report.txt
+            python/train_report.txt
+            python/model_*.json
