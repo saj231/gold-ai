@@ -108,9 +108,13 @@ def main(src, out_prefix):
         if HAVE_LGB:
             final, _ = fit(df[FEATURES], df[y])           # final model: all data
             json.dump(dict(rr=rr, threshold=thr, features=FEATURES, setups=SETUPS,
-                           model=final.dump_model()), open(f"{out_prefix}_rr{rr}.json", "w"), default=str)
+                           model=final.dump_model()),
+                      open(f"{out_prefix}_rr{rr}.json", "w"), default=str)
     json.dump(report, open(f"{out_prefix}_report.json", "w"), indent=1, default=str)
 
 
 if __name__ == "__main__":
     main(sys.argv[1], sys.argv[2])
+
+
+# END OF FILE
