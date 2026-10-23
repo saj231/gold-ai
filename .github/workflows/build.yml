@@ -1,0 +1,31 @@
+name: build-dataset
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r python/requirements.txt
+      - name: Download data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download data-v1 --pattern "*.zip" --dir data
+      - name: Build dataset
+        working-directory: python
+        run: |
+          python data_loader.py ../data/*.zip m15.parquet
+          python build_dataset.py m15.parquet dataset.parquet | tee report.txt
+          { echo '```'; cat report.txt; echo '```'; } >> $GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dataset
+          path: |
+            python/m15.parquet
+            python/dataset.parquet
+            python/report.txt
