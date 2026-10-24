@@ -3,7 +3,7 @@ import pandas as pd
 
 SPREAD = 0.30
 MIN_RISK_ATR = 1.0
-MAX_RISK_ATR = 4.0
+MAX_RISK_ATR = 2.0
 RRS = (1.5, 2.0, 3.0)
 
 
