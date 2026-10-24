@@ -16,24 +16,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release download data-v1 --pattern "*.zip" --dir data
-      - name: Build dataset
+      - name: Build M15
         working-directory: python
-        run: |
-          python data_loader.py ../data/*.zip m15.parquet
-          python build_dataset.py m15.parquet dataset.parquet | tee report.txt
+        run: python data_loader.py ../data/*.zip m15.parquet
+      - name: Build multi-style dataset
+        working-directory: python
+        run: python build_multi.py m15.parquet multi | tee build_report.txt
       - name: Train and evaluate
         working-directory: python
-        run: python train.py dataset.parquet model | tee train_report.txt
+        run: python train_multi.py multi H1 H4 | tee train_report.txt
       - name: Summary
         working-directory: python
         run: |
-          { echo '```'; cat report.txt; echo; cat train_report.txt; echo '```'; } >> $GITHUB_STEP_SUMMARY
+          { echo '```'; cat train_report.txt; echo; cat build_report.txt; echo '```'; } >> $GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         with:
-          name: dataset
+          name: multi
           path: |
-            python/m15.parquet
-            python/dataset.parquet
-            python/report.txt
+            python/multi_*.parquet
+            python/multi_report.json
+            python/build_report.txt
             python/train_report.txt
-            python/model_*.json
