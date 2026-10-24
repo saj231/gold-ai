@@ -1,0 +1,30 @@
+name: gold-scanner
+on:
+  schedule:
+    - cron: "5 * * * 0-5"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "scan or test"
+        default: "scan"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas numpy lightgbm
+      - name: Scan
+        working-directory: python
+        env:
+          MODE: ${{ github.event.inputs.mode || 'scan' }}
+          TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python scan.py
