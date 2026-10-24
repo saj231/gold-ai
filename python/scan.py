@@ -5,6 +5,7 @@ import pandas as pd
 import smc_engine as se
 import common as cm
 import fam_trend, fam_pa, fam_rtm
+import tracker
 from build_multi import ICT_EXTRA
 
 MINS = 60
@@ -160,17 +161,30 @@ def main():
                      tp1=float(r.ref + r.dir * 1.5 * abs(r.ref - r.stop)),
                      tp2=float(r.ref + r.dir * 2.0 * abs(r.ref - r.stop)),
                      tp3=float(r.ref + r.dir * 3.0 * abs(r.ref - r.stop)),
-                     probability=float(r.score), model_version=meta.get("version", 1))
+                     probability=float(r.score), model_version=meta.get("version", 1),
+                     mode=r.mode, family=r.family)
                 for r in picks.itertuples()]
-        new = supabase_new(su, sk, rows)
-        keys = {(x["bar_time"][:16], x["setup"], x["direction"]) for x in new}
-        picks = picks[[(pd.Timestamp(r.time).strftime("%Y-%m-%dT%H:%M"), r.setup,
-                        "BUY" if r.dir == 1 else "SELL") in keys for r in picks.itertuples()]]
+        try:
+            new = supabase_new(su, sk, rows)
+            keys = {(x["bar_time"][:16], x["setup"], x["direction"]) for x in new}
+            picks = picks[[(pd.Timestamp(r.time).strftime("%Y-%m-%dT%H:%M"), r.setup,
+                            "BUY" if r.dir == 1 else "SELL") in keys for r in picks.itertuples()]]
+        except Exception as e:
+            print("supabase error:", e)
+            picks = picks[picks["bar"] >= n - 1]
     groups = group_picks(picks) if len(picks) else []
     for r in groups[:3]:
         telegram(tok, chat, message(r, thr, "🧪 نمونه آزمایشی\n" if mode == "test" else ""))
     if len(groups) > 3:
         telegram(tok, chat, f"ℹ️ {len(groups) - 3} ستاپ دیگر هم با امتیاز کمتر پیدا شد.")
+    if mode != "test" and su:
+        try:
+            for r in tracker.update(su, sk, closed)[:5]:
+                telegram(tok, chat, tracker.close_message(r))
+            if now.weekday() == 4 and now.hour == 20:
+                telegram(tok, chat, tracker.weekly_report(su, sk))
+        except Exception as e:
+            print("tracker error:", e)
     if mode != "test" and now.hour == 6 and now.weekday() < 5:
         telegram(tok, chat, "✅ اسکنر طلا فعال است.")
 
