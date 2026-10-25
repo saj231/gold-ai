@@ -1,0 +1,24 @@
+name: fetch-cross
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Fetch cross-asset data
+        working-directory: python
+        env:
+          TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
+        run: python fetch_cross.py cross | tee fetch_log.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cross
+          path: |
+            python/cross/*.csv.gz
+            python/fetch_log.txt
