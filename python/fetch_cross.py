@@ -16,10 +16,11 @@ def call(params):
 
 
 def fetch_symbol(sym, key):
-    rows, start, tries = {}, START, 0
+    # TwelveData returns the NEWEST outputsize bars up to end_date, so we page BACKWARDS with end_date
+    rows, end, tries = {}, (datetime.utcnow() + timedelta(hours=2)).strftime(FMT), 0
     while True:
         js = call(dict(symbol=sym, interval="1h", outputsize=5000, timezone="UTC",
-                       order="ASC", start_date=start, apikey=key))
+                       order="ASC", end_date=end, apikey=key))
         if js.get("status") == "error" or "values" not in js:
             msg = str(js.get("message", js))
             if ("credits" in msg.lower() or "limit" in msg.lower()) and tries < 4:
@@ -33,12 +34,16 @@ def fetch_symbol(sym, key):
         vals = js["values"]
         if not vals:
             break
+        first = vals[0]["datetime"]
+        new = 0
         for v in vals:
+            if v["datetime"] not in rows:
+                new += 1
             rows[v["datetime"]] = (v["open"], v["high"], v["low"], v["close"])
-        print(sym, "got", len(vals), "up to", vals[-1]["datetime"], flush=True)
-        if len(vals) < 5000:
+        print(sym, "got", len(vals), "from", first, "to", vals[-1]["datetime"], flush=True)
+        if len(vals) < 5000 or new == 0 or first <= START:
             break
-        start = (datetime.strptime(vals[-1]["datetime"], FMT) + timedelta(hours=1)).strftime(FMT)
+        end = (datetime.strptime(first, FMT) - timedelta(seconds=1)).strftime(FMT)
         time.sleep(PAUSE)
     return rows
 
