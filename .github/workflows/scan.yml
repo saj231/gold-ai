@@ -1,30 +1,49 @@
+
 name: gold-scanner
+
 on:
-  schedule:
-    - cron: "5 * * * 0-5"
   workflow_dispatch:
     inputs:
       mode:
-        description: "scan or test"
-        default: "scan"
+        description: "Scan mode"
+        required: true
+        type: choice
+        options:
+          - scan
+          - test
+        default: scan
+      chat_id:
+        description: "Telegram chat ID"
+        required: false
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install pandas numpy lightgbm
-      - name: Scan
+
+      - name: Install dependencies
+        run: pip install -r python/requirements.txt
+
+      - name: Run gold scanner
         working-directory: python
         env:
-          MODE: ${{ github.event.inputs.mode || 'scan' }}
+          MODE: ${{ inputs.mode || 'scan' }}
           TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID: ${{ inputs.chat_id || secrets.TELEGRAM_CHAT_ID }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python scan.py
