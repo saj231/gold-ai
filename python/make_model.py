@@ -1,11 +1,11 @@
 
-import sys
-import os
 import json
+import os
+import sys
 
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
 
 from train_multi import (
     NUM,
@@ -46,51 +46,82 @@ def main(source, output_dir):
 
     if missing:
         raise RuntimeError(
-            f"Dataset missing columns: {sorted(missing)}"
+            f"Dataset is missing required columns: "
+            f"{sorted(missing)}"
         )
 
-    original_count = len(df)
+    initial_rows = len(df)
 
-    # Strict allow-list: ICT family and approved setups only.
+    # فقط معاملات پرشده و خانواده ICT/SMC مجازند.
     df = df[
         df["family"].isin(ALLOWED_FAMILY)
         & df["setup"].isin(ALLOWED_SETUPS)
+        & (df["filled"] == 1)
     ].copy()
 
     print(
-        f"ICT/SMC filter: kept {len(df)} "
-        f"of {original_count} rows"
+        f"ICT/SMC-only filter: kept "
+        f"{len(df)} of {initial_rows} rows"
     )
-
-    df = df[df["filled"] == 1].copy()
 
     if df.empty:
         raise RuntimeError(
-            "No filled ICT/SMC examples. "
-            "Model training cancelled."
+            "No filled ICT/SMC examples found. "
+            "Refusing to train or overwrite the model."
         )
 
     df["time"] = pd.to_datetime(
-        df["time"], utc=True
-    ).dt.tz_localize(None)
+        df["time"],
+        utc=True,
+        errors="coerce",
+    )
 
-    families = sorted(df["family"].unique())
-    setups = sorted(df["setup"].unique())
+    df = df.dropna(
+        subset=["time", f"R_{RR}"]
+    ).copy()
+
+    df["time"] = df["time"].dt.tz_localize(None)
+
+    families = sorted(
+        df["family"].astype(str).unique()
+    )
+
+    setups = sorted(
+        df["setup"].astype(str).unique()
+    )
 
     if families != ["ICT"]:
         raise RuntimeError(
-            f"Unexpected training families: {families}"
+            f"Training data contains unexpected families: "
+            f"{families}"
         )
 
-    df["fam_code"] = df["family"].map({
-        name: i
-        for i, name in enumerate(families)
-    })
+    if not setups:
+        raise RuntimeError(
+            "No allowed ICT/SMC setup types remain."
+        )
 
-    df["setup_code"] = df["setup"].map({
-        name: i
-        for i, name in enumerate(setups)
-    })
+    family_codes = {
+        name: index
+        for index, name in enumerate(families)
+    }
+
+    setup_codes = {
+        name: index
+        for index, name in enumerate(setups)
+    }
+
+    df["fam_code"] = (
+        df["family"]
+        .map(family_codes)
+        .astype(int)
+    )
+
+    df["setup_code"] = (
+        df["setup"]
+        .map(setup_codes)
+        .astype(int)
+    )
 
     for column in NUM:
         if column not in df.columns:
@@ -101,37 +132,48 @@ def main(source, output_dir):
         "setup_code",
     ]
 
+    target_column = f"R_{RR}"
+
     target = (
-        df[f"R_{RR}"] > 0
+        df[target_column] > 0
     ).astype(int)
 
-    return_column = f"R_{RR}"
-
-    train = df[df["time"] < TRAIN_END]
+    train = df[
+        df["time"] < TRAIN_END
+    ]
 
     valid = df[
         (df["time"] >= TRAIN_END)
         & (df["time"] < VALID_END)
     ]
 
-    test = df[df["time"] >= VALID_END]
+    test = df[
+        df["time"] >= VALID_END
+    ]
 
     print(
-        f"ICT/SMC only | "
-        f"train={len(train)} | "
-        f"valid={len(valid)} | "
+        f"ICT/SMC dataset | "
+        f"train={len(train)} "
+        f"valid={len(valid)} "
         f"test={len(test)}"
     )
 
-    print("Allowed setups in this dataset:")
-    for setup in setups:
-        print(f"  - {setup}")
+    print(
+        "Setups present in dataset:",
+        ", ".join(setups),
+    )
 
     if len(train) < 200 or len(valid) < 50:
         raise RuntimeError(
-            "Not enough ICT/SMC training examples. "
-            f"train={len(train)}, valid={len(valid)}. "
-            "No new model was saved."
+            "Not enough ICT/SMC examples for training "
+            f"(train={len(train)}, valid={len(valid)}). "
+            "The existing model has not been overwritten."
+        )
+
+    if target.loc[train.index].nunique() < 2:
+        raise RuntimeError(
+            "Training target has only one class. "
+            "Refusing to train an unusable model."
         )
 
     params = {
@@ -143,32 +185,34 @@ def main(source, output_dir):
         "bagging_fraction": 0.8,
         "bagging_freq": 1,
         "lambda_l2": 10.0,
-        "verbose": -1,
+        "verbosity": -1,
         "seed": 7,
     }
 
+    train_set = lgb.Dataset(
+        train[features],
+        label=target.loc[train.index],
+        categorical_feature=[
+            "fam_code",
+            "setup_code",
+        ],
+        free_raw_data=False,
+    )
+
     model = lgb.train(
         params,
-        lgb.Dataset(
-            train[features],
-            target.loc[train.index],
-            categorical_feature=[
-                "fam_code",
-                "setup_code",
-            ],
-        ),
+        train_set,
         num_boost_round=250,
     )
 
-    # Threshold is chosen using validation data,
-    # not the out-of-sample test set.
-    valid_scores = model.predict(
+    # آستانه فقط با بخش اعتبارسنجی تعیین می‌شود.
+    validation_scores = model.predict(
         valid[features]
     )
 
     threshold = float(
         np.quantile(
-            valid_scores,
+            validation_scores,
             1 - TOP_Q,
         )
     )
@@ -178,25 +222,29 @@ def main(source, output_dir):
             test[features]
         )
 
-        selected = test_scores >= threshold
-        selected_returns = test.loc[
-            selected, return_column
+        selected_mask = (
+            test_scores >= threshold
+        )
+
+        selected = test.loc[
+            selected_mask,
+            target_column,
         ]
 
         selected_mean = (
-            float(selected_returns.mean())
-            if len(selected_returns)
+            float(selected.mean())
+            if len(selected)
             else None
         )
 
         baseline_mean = float(
-            test[return_column].mean()
+            test[target_column].mean()
         )
 
         print(
             f"Threshold={threshold:.4f} | "
             f"test baseline mean R={baseline_mean:+.3f} | "
-            f"selected trades={int(selected.sum())} | "
+            f"selected n={len(selected)} | "
             f"selected mean R={selected_mean}"
         )
     else:
@@ -204,14 +252,20 @@ def main(source, output_dir):
             "No out-of-sample test rows available."
         )
 
-    os.makedirs(output_dir, exist_ok=True)
-
-    model_path = os.path.join(
-        output_dir, "h1_model.txt"
+    # فقط بعد از عبور از کنترل‌ها، مدل جدید ذخیره می‌شود.
+    os.makedirs(
+        output_dir,
+        exist_ok=True,
     )
 
-    metadata_path = os.path.join(
-        output_dir, "meta.json"
+    model_path = os.path.join(
+        output_dir,
+        "h1_model.txt",
+    )
+
+    meta_path = os.path.join(
+        output_dir,
+        "meta.json",
     )
 
     model.save_model(model_path)
@@ -228,7 +282,7 @@ def main(source, output_dir):
     }
 
     with open(
-        metadata_path,
+        meta_path,
         "w",
         encoding="utf-8",
     ) as file:
@@ -240,13 +294,11 @@ def main(source, output_dir):
         )
 
     print(
-        "Saved ICT/SMC-only model:",
-        model_path,
+        f"Saved ICT/SMC-only model: {model_path}"
     )
 
     print(
-        "Saved metadata:",
-        metadata_path,
+        f"Saved model metadata: {meta_path}"
     )
 
 
@@ -257,4 +309,7 @@ if __name__ == "__main__":
             "<dataset.parquet> <output_dir>"
         )
 
-    main(sys.argv[1], sys.argv[2])
+    main(
+        sys.argv[1],
+        sys.argv[2],
+    )
