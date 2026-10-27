@@ -1,21 +1,15 @@
 
 import os
-import sys
 import json
 import urllib.request
 import urllib.parse
 import urllib.error
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
-import lightgbm as lgb
 
 import smc_engine as se
 import common as cm
-import fam_trend
-import fam_pa
-import fam_rtm
 import tracker
 from build_multi import ICT_EXTRA
 
@@ -24,11 +18,23 @@ MINS = 60
 SYMBOL = "XAU/USD"
 MD = os.environ.get("MODEL_DIR", "../model")
 
+ALLOWED_FAMILY = "ICT"
+
+ALLOWED_SETUPS = {
+    "BOS_FVG",
+    "BOS_OB",
+    "BREAKER",
+    "IFVG",
+    "JUDAS_SWING",
+    "OTE",
+    "SILVER_BULLET",
+    "SWEEP_CHOCH_OB",
+    "SWEEP_DISP_FVG",
+    "SWEEP_RECLAIM",
+}
+
 FAM_FA = {
     "ICT": "ICT/SMC",
-    "PA": "پرایس اکشن",
-    "RTM": "RTM",
-    "TREND": "ترند/مومنتوم",
 }
 
 
@@ -38,7 +44,10 @@ def http_json(url, data=None, headers=None, timeout=40):
         if data is not None
         else None
     )
-    request_headers = {"User-Agent": "gold-ai-scanner/1.0"}
+
+    request_headers = {
+        "User-Agent": "gold-ai-scanner/2.0",
+    }
     request_headers.update(headers or {})
 
     request = urllib.request.Request(
@@ -47,10 +56,16 @@ def http_json(url, data=None, headers=None, timeout=40):
         headers=request_headers,
     )
 
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        content = response.read().decode("utf-8", errors="replace")
+    with urllib.request.urlopen(
+        request,
+        timeout=timeout,
+    ) as response:
+        text = response.read().decode(
+            "utf-8",
+            errors="replace",
+        )
 
-    return json.loads(content) if content else None
+    return json.loads(text) if text else None
 
 
 def telegram(token, chat, text):
@@ -59,20 +74,24 @@ def telegram(token, chat, text):
             "Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID"
         )
 
-    text = str(text)
+    remaining = str(text)
     chunks = []
 
-    while len(text) > 3900:
-        split_at = text.rfind("\n", 0, 3900)
+    while len(remaining) > 3900:
+        split_at = remaining.rfind(
+            "\n",
+            0,
+            3900,
+        )
 
         if split_at < 1000:
             split_at = 3900
 
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip()
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip()
 
-    if text:
-        chunks.append(text)
+    if remaining:
+        chunks.append(remaining)
 
     for chunk in chunks:
         result = http_json(
@@ -82,16 +101,25 @@ def telegram(token, chat, text):
                 "text": chunk,
                 "disable_web_page_preview": True,
             },
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+            },
             timeout=20,
         )
 
-        if not isinstance(result, dict) or result.get("ok") is not True:
+        if (
+            not isinstance(result, dict)
+            or result.get("ok") is not True
+        ):
             description = (
-                result.get("description", "Unknown Telegram error")
+                result.get(
+                    "description",
+                    "Unknown Telegram API error",
+                )
                 if isinstance(result, dict)
                 else "Invalid Telegram response"
             )
+
             raise RuntimeError(
                 f"Telegram sendMessage failed: {description}"
             )
@@ -99,7 +127,9 @@ def telegram(token, chat, text):
 
 def fetch_bars(key, count=5000):
     if not key:
-        raise RuntimeError("TWELVEDATA_KEY is missing")
+        raise RuntimeError(
+            "TWELVEDATA_KEY is missing"
+        )
 
     query = urllib.parse.urlencode({
         "symbol": SYMBOL,
@@ -111,7 +141,8 @@ def fetch_bars(key, count=5000):
     })
 
     result = http_json(
-        "https://api.twelvedata.com/time_series?" + query
+        "https://api.twelvedata.com/time_series?" + query,
+        timeout=40,
     )
 
     if not isinstance(result, dict) or "values" not in result:
@@ -120,27 +151,46 @@ def fetch_bars(key, count=5000):
             if isinstance(result, dict)
             else "Invalid response"
         )
-        raise RuntimeError(f"Twelve Data failed: {message}")
+
+        raise RuntimeError(
+            f"Twelve Data failed: {message}"
+        )
 
     df = pd.DataFrame(result["values"])
 
     if df.empty:
-        raise RuntimeError("Twelve Data returned no candles")
+        raise RuntimeError(
+            "Twelve Data returned no candles"
+        )
 
     df["datetime"] = pd.to_datetime(
-        df["datetime"], utc=True
+        df["datetime"],
+        utc=True,
     ).dt.tz_localize(None)
 
-    df = df.set_index("datetime").sort_index()
+    df = (
+        df.set_index("datetime")
+        .sort_index()
+    )
 
     for column in ("open", "high", "low", "close"):
         df[column] = pd.to_numeric(
-            df[column], errors="coerce"
+            df[column],
+            errors="coerce",
         )
 
-    df = df[["open", "high", "low", "close"]]
-    df = df.replace([np.inf, -np.inf], np.nan).dropna()
-    df = df[~df.index.duplicated(keep="last")]
+    df = df[
+        ["open", "high", "low", "close"]
+    ]
+
+    df = df.replace(
+        [np.inf, -np.inf],
+        np.nan,
+    ).dropna()
+
+    df = df[
+        ~df.index.duplicated(keep="last")
+    ]
 
     if len(df) < 200:
         raise RuntimeError(
@@ -162,53 +212,78 @@ def compute_orders(raw):
     se.MIN_RISK_ATR = cm.MIN_RISK_ATR
     se.MAX_RISK_ATR = cm.MAX_RISK_ATR
 
-    parts = []
-
+    # تنها موتور مجاز: ICT/SMC
     ict = se.detect(df)
 
-    if len(ict):
-        orders = pd.DataFrame({
-            "bar": ict["bar"],
-            "family": "ICT",
-            "setup": ict["setup"],
-            "dir": ict["dir"],
-            "mode": "limit",
-            "limit": ict["limit"],
-            "stop": ict["stop"],
-            "ref": ict["limit"],
-        })
-
-        for column in ICT_EXTRA:
-            orders[column] = ict[column].values
-
-        parts.append(orders)
-
-    for family_module in (fam_trend, fam_pa, fam_rtm):
-        orders_builder = cm.Orders(df)
-        family_module.run(orders_builder, df)
-        family_orders = orders_builder.frame()
-
-        if not family_orders.empty:
-            parts.append(family_orders)
-
-    parts = [part for part in parts if not part.empty]
-
-    if not parts:
+    if ict.empty:
         return df, pd.DataFrame()
 
-    orders = pd.concat(parts, ignore_index=True)
-    orders = cm.add_features(df, orders, MINS)
+    required = {
+        "bar",
+        "setup",
+        "dir",
+        "limit",
+        "stop",
+    }
+
+    missing = required.difference(ict.columns)
+
+    if missing:
+        raise RuntimeError(
+            f"SMC engine missing columns: {sorted(missing)}"
+        )
+
+    ict = ict[
+        ict["setup"].isin(ALLOWED_SETUPS)
+    ].copy()
+
+    if ict.empty:
+        return df, pd.DataFrame()
+
+    orders = pd.DataFrame({
+        "bar": ict["bar"].to_numpy(),
+        "family": ALLOWED_FAMILY,
+        "setup": ict["setup"].astype(str).to_numpy(),
+        "dir": ict["dir"].to_numpy(),
+        "mode": "limit",
+        "limit": ict["limit"].to_numpy(),
+        "stop": ict["stop"].to_numpy(),
+        "ref": ict["limit"].to_numpy(),
+    })
+
+    for column in ICT_EXTRA:
+        if column in ict.columns:
+            orders[column] = ict[column].to_numpy()
+        else:
+            orders[column] = np.nan
+
+    orders = orders[
+        orders["family"].eq(ALLOWED_FAMILY)
+        & orders["setup"].isin(ALLOWED_SETUPS)
+    ].copy()
+
+    if orders.empty:
+        return df, pd.DataFrame()
+
+    orders = cm.add_features(
+        df,
+        orders,
+        MINS,
+    )
 
     return df, orders
 
 
 def make_X(orders, meta):
-    X = pd.DataFrame(index=orders.index)
+    X = pd.DataFrame(
+        index=orders.index
+    )
 
     family_codes = {
         name: index
         for index, name in enumerate(meta["families"])
     }
+
     setup_codes = {
         name: index
         for index, name in enumerate(meta["setups"])
@@ -217,40 +292,75 @@ def make_X(orders, meta):
     for column in meta["features"]:
         if column == "fam_code":
             X[column] = (
-                orders["family"].map(family_codes).fillna(-1)
+                orders["family"]
+                .map(family_codes)
+                .fillna(-1)
             )
+
         elif column == "setup_code":
             X[column] = (
-                orders["setup"].map(setup_codes).fillna(-1)
+                orders["setup"]
+                .map(setup_codes)
+                .fillna(-1)
             )
+
         elif column in orders.columns:
             X[column] = orders[column]
+
         else:
             X[column] = np.nan
 
     return X.astype(float)
 
 
-def score_orders(orders, meta, booster, last_bar):
-    X = make_X(orders, meta)
+def select(orders, meta, booster, first_bar):
+    X = make_X(
+        orders,
+        meta,
+    )
 
     scored = orders.copy()
+
     scored["score"] = booster.predict(
         X[meta["features"]]
     )
 
     scored = scored.replace(
-        [np.inf, -np.inf], np.nan, subset=None
+        [np.inf, -np.inf],
+        np.nan,
     )
 
     scored = scored[
-        (scored["bar"] >= last_bar)
+        (scored["bar"] >= first_bar)
         & scored["score"].notna()
     ]
 
     return scored.sort_values(
-        "score", ascending=False
+        "score",
+        ascending=False,
     ).copy()
+
+
+def group_picks(picks):
+    # ستاپ‌های هم‌زمان و هم‌جهت را در یک گروه گزارش می‌کنیم.
+    groups = []
+
+    for _, group in picks.groupby(
+        ["time", "dir"],
+        sort=False,
+    ):
+        top = group.iloc[0].copy()
+
+        top["setup"] = " + ".join(
+            group["setup"].astype(str).tolist()[:3]
+        )
+
+        groups.append(top)
+
+    return sorted(
+        groups,
+        key=lambda row: -float(row["score"]),
+    )
 
 
 def safe_float(value, digits=3):
@@ -261,18 +371,19 @@ def safe_float(value, digits=3):
             return None
 
         return round(number, digits)
+
     except (TypeError, ValueError):
         return None
 
 
-def recent_candles(df, count=18):
+def recent_candles(df, count=10):
     result = []
 
     for timestamp, row in df.tail(count).iterrows():
         result.append({
-            "time_utc": pd.Timestamp(timestamp).strftime(
-                "%Y-%m-%d %H:%M"
-            ),
+            "time_utc": pd.Timestamp(
+                timestamp
+            ).strftime("%Y-%m-%d %H:%M"),
             "open": safe_float(row["open"], 2),
             "high": safe_float(row["high"], 2),
             "low": safe_float(row["low"], 2),
@@ -290,38 +401,67 @@ def candidate_payload(row, index, threshold):
 
     return {
         "id": f"C{index}",
-        "family": FAM_FA.get(
-            str(row["family"]), str(row["family"])
-        ),
+        "family": "ICT/SMC",
         "setup": str(row["setup"]),
-        "direction": "BUY" if direction == 1 else "SELL",
+        "direction": (
+            "BUY" if direction == 1 else "SELL"
+        ),
         "entry_type": str(row["mode"]),
         "entry": round(entry, 2),
         "stop": round(stop, 2),
-        "tp_1_5R": round(entry + direction * 1.5 * risk, 2),
-        "tp_2R": round(entry + direction * 2.0 * risk, 2),
-        "tp_3R": round(entry + direction * 3.0 * risk, 2),
-        "lightgbm_score": round(float(row["score"]), 4),
-        "lightgbm_threshold": round(float(threshold), 4),
+        "tp_1_5R": round(
+            entry + direction * 1.5 * risk,
+            2,
+        ),
+        "tp_2R": round(
+            entry + direction * 2.0 * risk,
+            2,
+        ),
+        "tp_3R": round(
+            entry + direction * 3.0 * risk,
+            2,
+        ),
+        "lightgbm_score": round(
+            float(row["score"]),
+            4,
+        ),
+        "lightgbm_threshold": round(
+            float(threshold),
+            4,
+        ),
         "passed_lightgbm_threshold": bool(
             float(row["score"]) >= threshold
         ),
         "bar_time_utc": pd.Timestamp(
             row["time"]
         ).strftime("%Y-%m-%d %H:%M"),
-        "risk_atr": safe_float(row.get("risk_atr")),
-        "with_trend": safe_float(row.get("with_trend"), 0),
+        "risk_atr": safe_float(
+            row.get("risk_atr")
+        ),
+        "with_trend": safe_float(
+            row.get("with_trend"),
+            0,
+        ),
     }
 
 
-def gemini_review(api_key, candles, candidates, threshold, latest_close):
+def gemini_review(
+    api_key,
+    candles,
+    candidates,
+    threshold,
+    latest_close,
+):
     if not api_key:
         raise RuntimeError(
-            "GEMINI_API_KEY is missing from GitHub Actions secrets"
+            "GEMINI_API_KEY is not configured"
         )
 
     model = (
-        os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
+        os.environ.get(
+            "GEMINI_MODEL",
+            "gemini-2.5-flash",
+        ).strip()
         or "gemini-2.5-flash"
     )
 
@@ -332,27 +472,30 @@ def gemini_review(api_key, candles, candidates, threshold, latest_close):
         + urllib.parse.quote(api_key)
     )
 
-    system_instruction = (
+    system = (
         "تو تحلیل‌گر کمکی بازار XAUUSD هستی و باید فارسی پاسخ بدهی. "
-        "فقط از داده‌ها و نامزدهای ارائه‌شده استفاده کن. "
+        "فقط از داده‌های ورودی استفاده کن. "
         "قیمت، خبر، اندیکاتور یا ستاپ جدید جعل نکن. "
-        "امتیاز LightGBM را احتمال قطعی برد معرفی نکن. "
+        "فقط ستاپ‌های ICT/SMC ارائه‌شده در ورودی مجازند. "
         "ستاپ واجد شرایط فقط نامزدی است که "
         "passed_lightgbm_threshold=true داشته باشد. "
-        "اگر چنین نامزدی وجود ندارد، صریحاً بگو ستاپ واجد شرایطی "
-        "برای پیشنهاد وجود ندارد و معامله‌ای پیشنهاد نکن. "
-        "اگر نامزد واجد شرایط وجود دارد، بهترین را فقط از میان "
-        "همان نامزدها انتخاب کن و دلایل، ریسک‌ها و عدم قطعیت "
-        "را توضیح بده. اطلاعات ورودی ممکن است قیمت لحظه‌ای نباشد."
+        "اگر هیچ نامزدی از آستانه عبور نکرده، "
+        "صریح بگو ستاپ واجد شرایطی وجود ندارد و معامله پیشنهاد نکن. "
+        "امتیاز LightGBM احتمال قطعی برد نیست. "
+        "خروجی کوتاه، فارسی و مناسب تلگرام باشد."
     )
 
-    payload = {
+    # درخواست کوچک‌تر برای کاهش احتمال Timeout
+    candles = candles[-10:] if isinstance(candles, list) else []
+    candidates = candidates[:5] if isinstance(candidates, list) else []
+
+    prompt = {
         "task": (
-            "کندل‌های اخیر H1 و خروجی واقعی موتورهای قوانین و LightGBM "
-            "را مقایسه کن. نامزدهای واجد شرایط را از نظر جهت، محل ورود، "
-            "حد ضرر، اهداف و هم‌راستایی با شواهد موجود بررسی کن. "
-            "اگر هیچ نامزدی از آستانه عبور نکرده، سیگنال نساز. "
-            "اگر شواهد برای رتبه‌بندی کافی نیست، این محدودیت را اعلام کن."
+            "کندل‌های اخیر و نامزدهای واقعی ICT/SMC را خلاصه کن. "
+            "فقط داده‌های ورودی را بررسی کن. "
+            "اگر هیچ نامزدی از آستانه عبور نکرده، "
+            "سیگنال نساز و این موضوع را صریح بگو. "
+            "ریسک‌ها و محدودیت اطلاعات را کوتاه توضیح بده."
         ),
         "latest_closed_bar_end_utc": latest_close,
         "lightgbm_threshold": threshold,
@@ -362,83 +505,102 @@ def gemini_review(api_key, candles, candidates, threshold, latest_close):
 
     body = {
         "systemInstruction": {
-            "parts": [{"text": system_instruction}]
+            "parts": [{
+                "text": system,
+            }],
         },
         "contents": [{
             "role": "user",
             "parts": [{
                 "text": json.dumps(
-                    payload, ensure_ascii=False
-                )
+                    prompt,
+                    ensure_ascii=False,
+                ),
             }],
         }],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 700,
+            "maxOutputTokens": 600,
         },
     }
 
     request = urllib.request.Request(
         url,
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        data=json.dumps(
+            body,
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+        },
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(
+            request,
+            timeout=55,
+        ) as response:
             response_text = response.read().decode(
-                "utf-8", errors="replace"
+                "utf-8",
+                errors="replace",
             )
 
     except urllib.error.HTTPError as exc:
         details = exc.read(1200).decode(
-            "utf-8", errors="replace"
+            "utf-8",
+            errors="replace",
         )
 
         try:
             parsed = json.loads(details)
-            details = parsed.get("error", {}).get(
-                "message", details
-            )
+            details = parsed.get(
+                "error",
+                {},
+            ).get("message", details)
         except (ValueError, TypeError):
             pass
 
-        # Never print the request URL or API key.
+        # URL درخواست چاپ نمی‌شود تا API key افشا نشود.
         print(
-            f"Gemini HTTP {exc.code}: {str(details)[:500]}"
+            f"Gemini HTTP {exc.code}: "
+            f"{str(details)[:400]}"
         )
+
         raise RuntimeError(
-            f"Gemini API returned HTTP {exc.code}: "
-            f"{str(details)[:250]}"
+            f"Gemini API returned HTTP {exc.code}"
         ) from None
 
     except Exception as exc:
         print(
-            f"Gemini network error: {type(exc).__name__}: "
-            f"{str(exc)[:250]}"
+            f"Gemini request failed: "
+            f"{type(exc).__name__}: {str(exc)[:200]}"
         )
+
         raise RuntimeError(
-            f"Gemini network error ({type(exc).__name__})"
+            f"Gemini request failed ({type(exc).__name__})"
         ) from None
 
     try:
         data = json.loads(response_text)
+
         answer = "\n".join(
             part.get("text", "")
             for part in data["candidates"][0]["content"]["parts"]
             if isinstance(part, dict)
         ).strip()
+
     except (ValueError, KeyError, IndexError, TypeError):
-        print("Gemini returned an unrecognized response")
         raise RuntimeError(
             "Gemini response could not be parsed"
         ) from None
 
     if not answer:
-        raise RuntimeError("Gemini returned an empty response")
+        raise RuntimeError(
+            "Gemini returned an empty response"
+        )
 
-    return answer[:2500]
+    return answer[:2200]
 
 
 def format_candidate(row, threshold, tag=""):
@@ -447,9 +609,10 @@ def format_candidate(row, threshold, tag=""):
     stop = float(row["stop"])
     risk = abs(entry - stop)
 
-    side = "🟢 خرید (BUY)" if direction == 1 else "🔴 فروش (SELL)"
-    family = FAM_FA.get(
-        str(row["family"]), str(row["family"])
+    side = (
+        "🟢 خرید (BUY)"
+        if direction == 1
+        else "🔴 فروش (SELL)"
     )
 
     if str(row["mode"]) == "limit":
@@ -457,31 +620,44 @@ def format_candidate(row, threshold, tag=""):
     else:
         entry_text = f"ورود بازار نزدیک {entry:.2f}"
 
-    timestamp = pd.Timestamp(row["time"]).strftime(
-        "%Y-%m-%d %H:%M"
-    )
+    timestamp = pd.Timestamp(
+        row["time"]
+    ).strftime("%Y-%m-%d %H:%M")
+
+    tp15 = entry + direction * 1.5 * risk
+    tp2 = entry + direction * 2.0 * risk
+    tp3 = entry + direction * 3.0 * risk
 
     return (
-        f"{tag}📊 نامزد ستاپ XAUUSD H1\n"
+        f"{tag}📊 ستاپ XAUUSD H1\n"
         f"{side}\n"
-        f"سبک: {family}\n"
-        f"قانون/ستاپ: {row['setup']}\n"
-        f"ورود پیشنهادی موتور: {entry_text}\n"
+        f"سبک: ICT/SMC\n"
+        f"ستاپ: {row['setup']}\n"
+        f"ورود: {entry_text}\n"
         f"حد ضرر: {stop:.2f}\n"
         f"ریسک قیمتی: {risk:.2f}\n"
         f"اهداف محاسباتی: "
-        f"1.5R={entry + direction * 1.5 * risk:.2f} | "
-        f"2R={entry + direction * 2 * risk:.2f} | "
-        f"3R={entry + direction * 3 * risk:.2f}\n"
+        f"1.5R={tp15:.2f} | "
+        f"2R={tp2:.2f} | "
+        f"3R={tp3:.2f}\n"
         f"امتیاز LightGBM: {float(row['score']):.3f}\n"
         f"آستانه مدل: {threshold:.3f}\n"
         f"زمان کندل: {timestamp} UTC\n"
-        "این خروجی تحلیلی است؛ قبل از هر تصمیم، داده و ریسک را بررسی کن."
+        "⚠️ امتیاز مدل تضمین سود یا احتمال قطعی برد نیست."
     )
 
 
-def persist_candidates(supabase_url, service_key, picks, meta):
-    if not supabase_url or not service_key or picks.empty:
+def persist_candidates(
+    supabase_url,
+    service_key,
+    picks,
+    meta,
+):
+    if (
+        not supabase_url
+        or not service_key
+        or picks.empty
+    ):
         return
 
     rows = []
@@ -493,10 +669,14 @@ def persist_candidates(supabase_url, service_key, picks, meta):
         risk = abs(entry - stop)
 
         rows.append({
-            "bar_time": pd.Timestamp(row["time"]).isoformat() + "Z",
+            "bar_time": (
+                pd.Timestamp(row["time"]).isoformat() + "Z"
+            ),
             "symbol": "XAUUSD",
             "setup": str(row["setup"]),
-            "direction": "BUY" if direction == 1 else "SELL",
+            "direction": (
+                "BUY" if direction == 1 else "SELL"
+            ),
             "entry": entry,
             "stop": stop,
             "tp1": entry + direction * 1.5 * risk,
@@ -505,19 +685,22 @@ def persist_candidates(supabase_url, service_key, picks, meta):
             "probability": float(row["score"]),
             "model_version": meta.get("version", 1),
             "mode": str(row["mode"]),
-            "family": str(row["family"]),
+            "family": "ICT",
         })
 
     headers = {
         "apikey": service_key,
         "Authorization": "Bearer " + service_key,
         "Content-Type": "application/json",
-        "Prefer": "resolution=ignore-duplicates,return=minimal",
+        "Prefer": (
+            "resolution=ignore-duplicates,return=representation"
+        ),
     }
 
     endpoint = (
         supabase_url.rstrip("/")
         + "/rest/v1/signals"
+        + "?on_conflict=symbol,bar_time,setup,direction"
     )
 
     try:
@@ -527,25 +710,57 @@ def persist_candidates(supabase_url, service_key, picks, meta):
             headers=headers,
             timeout=20,
         )
+
         print(
             f"Supabase persistence attempted for {len(rows)} candidates"
         )
+
     except Exception as exc:
-        # Database errors must not suppress Telegram reports.
+        # خطای دیتابیس نباید ارسال گزارش تلگرام را متوقف کند.
         print(
-            f"Supabase persistence failed: {type(exc).__name__}: "
-            f"{str(exc)[:300]}"
+            f"Supabase persistence failed: "
+            f"{type(exc).__name__}: {str(exc)[:250]}"
         )
 
 
 def main():
-    mode = os.environ.get("MODE", "scan").strip().lower()
-    token = os.environ.get("TELEGRAM_TOKEN", "").strip()
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    twelve_key = os.environ.get("TWELVEDATA_KEY", "").strip()
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    supabase_url = os.environ.get("SUPABASE_URL", "").strip()
-    service_key = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+    import lightgbm as lgb
+
+    mode = (
+        os.environ.get("MODE", "scan")
+        .strip()
+        .lower()
+    )
+
+    token = os.environ.get(
+        "TELEGRAM_TOKEN",
+        "",
+    ).strip()
+
+    chat_id = os.environ.get(
+        "TELEGRAM_CHAT_ID",
+        "",
+    ).strip()
+
+    twelve_key = os.environ.get(
+        "TWELVEDATA_KEY",
+        "",
+    ).strip()
+
+    gemini_key = os.environ.get(
+        "GEMINI_API_KEY",
+        "",
+    ).strip()
+
+    supabase_url = os.environ.get(
+        "SUPABASE_URL",
+        "",
+    ).strip()
+
+    service_key = os.environ.get(
+        "SUPABASE_SERVICE_KEY",
+        "",
+    ).strip()
 
     if not token or not chat_id:
         raise RuntimeError(
@@ -559,31 +774,71 @@ def main():
         telegram(
             token,
             chat_id,
-            "⏳ اسکن XAUUSD H1 شروع شد.\n"
-            "در حال دریافت داده، اجرای موتورهای ستاپ و ارزیابی LightGBM هستم.",
+            "⏳ اسکن XAUUSD شروع شد؛ "
+            "موتور ICT/SMC و مدل LightGBM در حال بررسی‌اند.",
         )
     except Exception as exc:
         print(
             f"Scan-start Telegram notification failed: "
-            f"{type(exc).__name__}: {str(exc)[:250]}"
+            f"{type(exc).__name__}: {str(exc)[:200]}"
         )
 
     try:
-        if not twelve_key:
-            raise RuntimeError("TWELVEDATA_KEY is missing")
+        meta_path = os.path.join(
+            MD,
+            "meta.json",
+        )
 
-        meta_path = os.path.join(MD, "meta.json")
-        model_path = os.path.join(MD, "h1_model.txt")
+        model_path = os.path.join(
+            MD,
+            "h1_model.txt",
+        )
 
-        with open(meta_path, encoding="utf-8") as file:
+        with open(
+            meta_path,
+            encoding="utf-8",
+        ) as file:
             meta = json.load(file)
 
-        threshold = float(meta["threshold"])
-        booster = lgb.Booster(model_file=model_path)
+        # مدل قدیمی که خانواده‌های مختلف داشته، مجاز نیست.
+        trained_families = set(
+            meta.get("families", [])
+        )
+
+        trained_setups = set(
+            meta.get("setups", [])
+        )
+
+        if trained_families != {"ICT"}:
+            raise RuntimeError(
+                "The installed model was not trained on ICT/SMC only. "
+                "Run GitHub Actions -> train-model first. "
+                f"Model families: {sorted(trained_families)}"
+            )
+
+        if (
+            not trained_setups
+            or not trained_setups.issubset(ALLOWED_SETUPS)
+        ):
+            raise RuntimeError(
+                "Model metadata has an empty or unexpected ICT/SMC setup list. "
+                f"Model setups: {sorted(trained_setups)}"
+            )
+
+        threshold = float(
+            meta["threshold"]
+        )
+
+        booster = lgb.Booster(
+            model_file=model_path
+        )
 
         raw = fetch_bars(twelve_key)
 
-        now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+        now = pd.Timestamp.now(
+            tz="UTC"
+        ).tz_localize(None)
+
         closed = raw[
             raw.index + pd.Timedelta(minutes=MINS) <= now
         ]
@@ -593,105 +848,143 @@ def main():
                 "No fully closed H1 candles were returned"
             )
 
-        last_close = closed.index[-1] + pd.Timedelta(minutes=MINS)
-        age_hours = (now - last_close).total_seconds() / 3600
+        last_close = (
+            closed.index[-1]
+            + pd.Timedelta(minutes=MINS)
+        )
+
+        age_hours = (
+            now - last_close
+        ).total_seconds() / 3600
 
         print(
             f"Last closed bar ends {last_close} UTC; "
-            f"age {age_hours:.2f}h; bars {len(closed)}"
+            f"age={age_hours:.2f}h; candles={len(closed)}"
         )
 
         if age_hours > 2.5:
             telegram(
                 token,
                 chat_id,
-                "⚠️ گزارش اسکن XAUUSD\n"
-                f"آخرین کندل بسته‌شده {age_hours:.1f} ساعت قدمت دارد.\n"
-                "برای جلوگیری از تحلیل داده کهنه، ستاپ تازه پیشنهاد نمی‌شود.",
+                "⚠️ اسکن انجام شد، اما دادهٔ آخرین کندل بسته‌شده "
+                f"{age_hours:.1f} ساعت قدمت دارد.\n"
+                "برای جلوگیری از تحلیل داده کهنه، "
+                "ستاپ تازه پیشنهاد نمی‌شود.",
             )
             return
 
         df, orders = compute_orders(closed)
 
+        # فقط ستاپ‌هایی امتیاز می‌گیرند که مدل قبلاً دیده است.
+        if not orders.empty:
+            orders = orders[
+                orders["family"].eq("ICT")
+                & orders["setup"].isin(trained_setups)
+            ].copy()
+
+        candle_count = len(df)
+
+        lookback = (
+            72 if mode == "test" else 3
+        )
+
         if orders.empty:
-            print("No rule-engine candidates generated")
+            print(
+                "No eligible ICT/SMC candidates generated"
+            )
 
             report = (
-                "🔎 گزارش نهایی اسکن XAUUSD H1\n"
-                f"کندل‌های معتبر: {len(closed)}\n"
+                "🔎 گزارش اسکن XAUUSD H1\n"
+                f"کندل‌های بررسی‌شده: {len(closed)}\n"
                 f"آخرین کندل بسته‌شده: {last_close} UTC\n"
-                "نتیجه: موتورهای ICT/SMC، پرایس اکشن، RTM و ترند "
-                "هیچ نامزدی تولید نکردند.\n"
-                "این به معنی نبود قطعی فرصت در بازار نیست؛ "
-                "فقط یعنی این اسکن نامزد معتبری پیدا نکرد."
+                "موتور ICT/SMC هیچ ستاپ آموزش‌دیدهٔ واجد بررسی پیدا نکرد.\n"
+                "هیچ معامله‌ای پیشنهاد نمی‌شود."
             )
 
             try:
-                review = gemini_review(
+                ai = gemini_review(
                     gemini_key,
                     recent_candles(closed),
                     [],
                     threshold,
                     str(last_close),
                 )
-                report += "\n\n🤖 بررسی Gemini:\n" + review
-            except Exception as exc:
+
                 report += (
-                    "\n\n🤖 تحلیل Gemini ناموفق بود: "
-                    f"{str(exc)[:300]}\n"
-                    "گزارش اسکنر بدون تحلیل Gemini ارسال می‌شود."
+                    "\n\n🤖 بررسی Gemini:\n"
+                    + ai
                 )
 
-            telegram(token, chat_id, report)
-            return
-
-        # Normal scan checks the latest 3 closed bars.
-        # Test mode inspects a wider 72-bar window for diagnostics.
-        lookback = 72 if mode == "test" else 3
-        last_bar_index = max(0, len(df) - lookback)
-
-        scored = orders.copy()
-        features = make_X(scored, meta)
-
-        scored["score"] = booster.predict(
-            features[meta["features"]]
-        )
-
-        scored = scored[
-            (scored["bar"] >= last_bar_index)
-            & scored["score"].notna()
-        ].sort_values("score", ascending=False)
-
-        if scored.empty:
-            print("No scored candidates in the requested window")
+            except Exception as exc:
+                report += (
+                    "\n\n🤖 بررسی Gemini انجام نشد: "
+                    f"{str(exc)[:250]}\n"
+                    "گزارش مستقل اسکنر ارسال می‌شود."
+                )
 
             telegram(
                 token,
                 chat_id,
-                "🔎 گزارش نهایی اسکن XAUUSD H1\n"
-                f"نامزدهای قوانین در داده‌ها: {len(orders)}\n"
-                "در پنجره زمانی انتخاب‌شده نامزد قابل امتیازدهی پیدا نشد.\n"
-                "هیچ سیگنال معاملاتی پیشنهاد نمی‌شود.",
+                report,
             )
             return
 
-        qualified = scored[
+        first_bar = max(
+            0,
+            candle_count - lookback,
+        )
+
+        scored = select(
+            orders,
+            meta,
+            booster,
+            first_bar,
+        )
+
+        if scored.empty:
+            telegram(
+                token,
+                chat_id,
+                "🔎 گزارش اسکن XAUUSD H1\n"
+                "در پنجره زمانی انتخاب‌شده، "
+                "نامزد قابل امتیازدهی پیدا نشد.\n"
+                "هیچ معامله‌ای پیشنهاد نمی‌شود.",
+            )
+            return
+
+        qualified_all = scored[
             scored["score"] >= threshold
         ].copy()
 
+        ranked = scored.head(8).copy()
+
+        qualified = ranked[
+            ranked["score"] >= threshold
+        ].copy()
+
         print(
-            f"Orders in window: {len(scored)}; "
-            f"above threshold: {len(qualified)}; "
-            f"threshold: {threshold:.4f}"
+            f"ICT/SMC candidates={len(scored)}; "
+            f"above threshold={len(qualified_all)}; "
+            f"threshold={threshold:.4f}"
         )
 
-        # Gemini receives actual rule-engine candidates and their model scores.
-        # It must not invent a candidate when none passes the threshold.
-        candidates_for_review = scored.head(8)
-        candidate_data = [
-            candidate_payload(row, index + 1, threshold)
+        # فقط ستاپ‌های عبورکرده از آستانه ذخیره می‌شوند.
+        if mode != "test":
+            persist_candidates(
+                supabase_url,
+                service_key,
+                qualified_all,
+                meta,
+            )
+
+        candidates = [
+            candidate_payload(
+                row,
+                index + 1,
+                threshold,
+            )
             for index, (_, row) in enumerate(
-                candidates_for_review.iterrows()
+                ranked.iterrows()
             )
         ]
 
@@ -699,86 +992,100 @@ def main():
             ai_review = gemini_review(
                 gemini_key,
                 recent_candles(closed),
-                candidate_data,
+                candidates,
                 threshold,
                 str(last_close),
             )
-            gemini_status = "موفق"
+
+            ai_status = "موفق"
+
         except Exception as exc:
             ai_review = (
                 "تحلیل Gemini انجام نشد: "
-                f"{str(exc)[:300]}\n"
+                f"{str(exc)[:250]}\n"
                 "نتیجه مستقل اسکنر در ادامه آمده است."
             )
-            gemini_status = "ناموفق"
-            print(
-                f"Gemini review failed: {type(exc).__name__}: "
-                f"{str(exc)[:400]}"
-            )
 
-        if not qualified.empty:
-            persist_candidates(
-                supabase_url,
-                service_key,
-                qualified,
-                meta,
+            ai_status = "ناموفق"
+
+            print(
+                f"Gemini review failed: "
+                f"{type(exc).__name__}: {str(exc)[:250]}"
             )
 
         report = (
             "🔎 گزارش نهایی اسکن XAUUSD H1\n"
             f"کندل‌های دریافت‌شده: {len(closed)}\n"
             f"آخرین کندل بسته‌شده: {last_close} UTC\n"
-            f"نامزدهای قوانین در پنجره: {len(scored)}\n"
+            f"نامزدهای ICT/SMC در پنجره: {len(scored)}\n"
             f"نامزدهای بالاتر از آستانه LightGBM "
-            f"({threshold:.3f}): {len(qualified)}\n"
+            f"({threshold:.3f}): {len(qualified_all)}\n"
         )
 
         if qualified.empty:
             report += (
-                "\n❌ هیچ ستاپی از آستانه مدل عبور نکرد.\n"
+                "\n❌ هیچ ستاپ ICT/SMC از آستانه مدل عبور نکرد.\n"
                 "بنابراین ستاپ قابل‌معامله‌ای معرفی نمی‌شود.\n"
             )
 
-            report += "\nبهترین نامزدهای زیر آستانه (صرفاً اطلاعاتی):\n"
-
-            for _, row in scored.head(3).iterrows():
-                family = FAM_FA.get(
-                    str(row["family"]), str(row["family"])
-                )
-                side = "BUY" if int(row["dir"]) == 1 else "SELL"
-
+            if not ranked.empty:
                 report += (
-                    f"• {family} / {row['setup']} — "
-                    f"{side} — امتیاز {float(row['score']):.3f}\n"
+                    "\nبهترین نامزدهای زیر آستانه "
+                    "(صرفاً اطلاعاتی، نه سیگنال):\n"
                 )
+
+                for _, row in ranked.head(3).iterrows():
+                    report += (
+                        f"• ICT/SMC / {row['setup']} — "
+                        f"{'BUY' if int(row['dir']) == 1 else 'SELL'} — "
+                        f"امتیاز {float(row['score']):.3f}\n"
+                    )
+
         else:
-            report += "\n✅ ستاپ‌های واجد شرایط LightGBM:\n"
+            groups = group_picks(qualified)
 
-            for _, row in qualified.head(3).iterrows():
-                report += "\n" + format_candidate(
-                    row, threshold
-                ) + "\n"
+            report += (
+                "\n✅ ستاپ‌های واجد شرایط ICT/SMC:\n"
+            )
 
-            if len(qualified) > 3:
+            report += "\n\n".join(
+                format_candidate(
+                    row,
+                    threshold,
+                )
+                for row in groups[:3]
+            )
+
+            if len(groups) > 3:
                 report += (
-                    f"\nتعداد {len(qualified) - 3} نامزد واجد شرایط دیگر "
-                    "وجود دارد که در این پیام نمایش داده نشده‌اند.\n"
+                    f"\n\n{len(groups) - 3} گروه ستاپ دیگر "
+                    "هم واجد شرایط بود."
                 )
 
         report += (
-            f"\n\n🤖 بررسی Gemini ({gemini_status}):\n"
+            f"\n\n🤖 بررسی Gemini ({ai_status}):\n"
             f"{ai_review}\n\n"
-            "⚠️ این گزارش ابزار تحلیلی است، نه تضمین سود. "
-            "پیش از معامله، قیمت، ورود، حد ضرر و ریسک را دستی بررسی کن."
+            "⚠️ این گزارش تضمین سود نیست؛ "
+            "پیش از معامله، قیمت و ریسک را دستی بررسی کن."
         )
 
-        telegram(token, chat_id, report)
+        telegram(
+            token,
+            chat_id,
+            report,
+        )
 
-        # Tracker is optional. A tracking error must not hide scan results.
-        if mode == "scan" and supabase_url and service_key:
+        # Tracker اختیاری است و خطای آن نباید گزارش اسکن را حذف کند.
+        if (
+            mode == "scan"
+            and supabase_url
+            and service_key
+        ):
             try:
                 tracked = tracker.update(
-                    supabase_url, service_key, closed
+                    supabase_url,
+                    service_key,
+                    closed,
                 )
 
                 for item in tracked[:5]:
@@ -788,24 +1095,29 @@ def main():
                         tracker.close_message(item),
                     )
 
-                if now.weekday() == 4 and now.hour == 20:
+                if (
+                    now.weekday() == 4
+                    and now.hour == 20
+                ):
                     telegram(
                         token,
                         chat_id,
                         tracker.weekly_report(
-                            supabase_url, service_key
+                            supabase_url,
+                            service_key,
                         ),
                     )
 
             except Exception as exc:
                 print(
-                    f"Tracker error (non-fatal): {type(exc).__name__}: "
-                    f"{str(exc)[:350]}"
+                    f"Tracker error (non-fatal): "
+                    f"{type(exc).__name__}: {str(exc)[:300]}"
                 )
 
     except Exception as exc:
         print(
-            f"SCAN FAILED: {type(exc).__name__}: {str(exc)[:600]}"
+            f"SCAN FAILED: {type(exc).__name__}: "
+            f"{str(exc)[:500]}"
         )
 
         try:
@@ -814,14 +1126,15 @@ def main():
                 chat_id,
                 "❌ اجرای اسکن XAUUSD کامل نشد.\n"
                 f"نوع خطا: {type(exc).__name__}\n"
-                f"شرح: {str(exc)[:500]}\n"
-                "جزئیات اجرا را در GitHub Actions بررسی کن.",
+                f"شرح: {str(exc)[:400]}\n"
+                "گزارش GitHub Actions را بررسی کن.",
             )
+
         except Exception as notify_exc:
             print(
-                "Failure notification also failed: "
+                f"Failure notification failed: "
                 f"{type(notify_exc).__name__}: "
-                f"{str(notify_exc)[:200]}"
+                f"{str(notify_exc)[:150]}"
             )
 
         raise
