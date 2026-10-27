@@ -5,18 +5,17 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Scan mode"
+        description: "scan or test"
         required: true
+        default: "scan"
         type: choice
         options:
           - scan
           - test
-        default: scan
       chat_id:
-        description: "Telegram chat ID for this scan"
+        description: "Telegram chat ID for this requested scan"
         required: false
         type: string
-        default: ""
 
 permissions:
   contents: read
@@ -41,10 +40,12 @@ jobs:
       - name: Run gold scanner
         working-directory: python
         env:
-          MODE: ${{ inputs.mode }}
+          MODE: ${{ inputs.mode || 'scan' }}
           TWELVEDATA_KEY: ${{ secrets.TWELVEDATA_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ inputs.chat_id || secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-2.5-flash
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: python scan.py
