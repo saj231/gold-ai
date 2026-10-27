@@ -386,7 +386,7 @@ def gemini_review(api_key, candles, candidates, threshold, latest_close):
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.urlopen(request, timeout=120) as response:
             response_text = response.read().decode(
                 "utf-8", errors="replace"
             )
