@@ -321,7 +321,7 @@ def gemini_review(api_key, candles, candidates, threshold, latest_close):
         )
 
     model = (
-        os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+        os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
         or "gemini-2.5-flash"
     )
 
